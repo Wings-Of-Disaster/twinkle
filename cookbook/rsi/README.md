@@ -7,10 +7,10 @@ someone else would be given, and only the statements whose pass rate lands insid
 same optimizer step.
 
 For the sandbox host and the agent that runs inside it, see
-[agentic/README.md](agentic/README.md). This file covers the four things a run can
-add on top, all of them optional and all of them off by default.
+[agentic/README.md](agentic/README.md). This file covers what a run can add on
+top. All of it is optional and all of it is off by default.
 
-## The four layers
+## What a run can add
 
 | layer | what it adds | turn it on with | code |
 |---|---|---|---|
@@ -18,6 +18,7 @@ add on top, all of them optional and all of them off by default.
 | profiles | one restricted tool set and one seeded fixture per slot | `TWINKLE_RSI_PROFILES` or `TWINKLE_TOPIC_AFFINITIES` | `twinkle_agentic.envs.profiles`, `.topic_profile` |
 | knowledge bank | topics retrieved from a mined bank instead of invented | `TWINKLE_KNOWLEDGE_CARDS` | `twinkle_agentic.challenger.knowledge` |
 | task bank | the record of kept tasks, so novelty has a referent | `TWINKLE_TASK_BANK` | `twinkle_agentic.challenger.task_bank` |
+| novelty score | a within-group novelty a program computes, instead of a judge's | see below | `twinkle_agentic.novelty_metric` |
 
 Slot construction lives in [`agentic/slot.py`](agentic/slot.py). With none of the
 variables above set it builds exactly the `AgentEnv` / `LocalEnv` list
@@ -127,6 +128,39 @@ world holds. That is what makes the answer unfakeable.
 receipt is written when the tool answers, so a policy that invents a url has
 nothing to match against.
 
+## Scoring novelty
+
+`twinkle_agentic.novelty_metric.NoveltyScorer` scores a group of sibling proposals
+against each other. It exists because a novelty term an LLM judge supplies can be
+measured, and on two recorded runs it measured badly: 93% and 97.6% of proposals
+scored exactly zero, and 66% and 82.4% of groups scored identically on all eight
+siblings. GRPO subtracts the group mean and divides by the group standard
+deviation, so a term constant across a group contributes **exactly zero
+gradient**. Those runs had a novelty term in the reward and it did nothing.
+
+`constant_group_rate` is that measurement, exported so any replacement is judged
+the same way.
+
+Two terms, both computed inside the group because that is the contrast GRPO uses:
+`distance` is `1 - max cosine` to the closest sibling, and `spread` is
+`1 / cluster size` over siblings within `cluster_threshold` of each other. The
+vectoriser is fitted on the whole corpus of statements, not on one group — these
+statements share their scaffolding verbatim, and IDF fitted per group would weight
+that boilerplate above the content.
+
+Its calibration set is `TaskBank.sibling_groups()`, which is why that method
+keeps a group id per statement:
+
+```python
+bank = TaskBank(os.path.join(SAVE_DIR, 'tasks.jsonl'))
+bank.ingest_recorder(SAVE_DIR)
+scorer = NoveltyScorer(bank.statements(), calibration_groups=bank.sibling_groups())
+scores = scorer.score(group_statements)   # one per proposal, input order
+```
+
+Needs `scikit-learn` and `numpy`, imported inside the methods that use them. A run
+that never scores novelty pays neither.
+
 ## Things that will bite
 
 - **Mixin order.** `ProfiledEnvMixin` has to precede `WorldToolsMixin`, which has
@@ -143,3 +177,6 @@ nothing to match against.
 - **The task bank is filled from the recorder.** `AgenticChallenger` writes every
   proposal to `<save-dir>/trajs/index.jsonl`; `TaskBank.ingest_recorder` reads the
   kept ones back each iteration. No `--save-dir` means no bank.
+- **The novelty scorer cannot see words its corpus never used.** `TfidfVectorizer`
+  drops out-of-vocabulary tokens, so fit it on the run being scored. Fitting on
+  one run and scoring another gives a scorer blind to the difference.

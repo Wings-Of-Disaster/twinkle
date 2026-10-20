@@ -560,15 +560,13 @@ class KnowledgeStore:
         return cards
 
     def route(self, group_id: int, epoch: int = 0) -> KnowledgeRoute:
-        # ``epoch`` is the training iteration, and it has to drive the routing.
-        # rsi.py builds a fresh Run per iteration and Run.n_launched restarts at
-        # zero, so without it the draw is a pure function of the group index and
-        # every iteration replays the identical arm sequence and the identical
-        # cards. Measured on knowledge-main-30step-v2 (19 iterations, 544 kept
-        # tasks): 13 distinct anchor cards out of a 256-card bank, i.e. 5%
-        # coverage, novelty_zero_rate 0.98, and n_pass_in_band_rate falling
-        # 0.43 -> 0.27 only because the same tasks got easier every time the
-        # policy met them again. The arm is hashed on it; the anchor advances a
+        # ``epoch`` is the training iteration, and it has to drive the routing. A
+        # loop that builds a fresh challenger per iteration restarts its group
+        # counter at zero, so without the epoch the draw is a pure function of the
+        # group index and every iteration replays the identical arm sequence and
+        # the identical cards. Coverage then stops being a property of the run and
+        # becomes a property of the counter's period, and tasks get easier each
+        # iteration only because the policy keeps meeting the same ones. The arm is hashed on it; the anchor advances a
         # cursor through the bank, which is what turns 5% coverage into most of
         # the bank over a run instead of a chance-dependent fraction of it.
         # ``block`` is the block *within the epoch*, which is what ``cursor =

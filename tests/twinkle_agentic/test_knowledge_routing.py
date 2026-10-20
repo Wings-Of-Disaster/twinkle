@@ -3,8 +3,8 @@
 
 The property under test is coverage. A challenger left to invent topics returns
 to the ones it can already verify, and drawing uniformly from a bank leaves the
-rest to chance: 8 blocks x 20 epochs over a 256-card bank reached 13 distinct
-cards. Walking a seeded permutation reaches every card in
+rest to chance: with the epoch fixed the draw is a pure function of the group
+index, so every pass replays the same anchors. Walking a seeded permutation reaches every card in
 ``len(cards) / blocks_per_epoch`` epochs and repeats none within a pass, which
 is what these tests pin.
 """
@@ -160,7 +160,7 @@ def test_a_different_seed_routes_differently(bank):
 
 def test_the_epoch_moves_the_arm_order(bank):
     # With the epoch fixed every pass replays the identical sequence, which is
-    # the bug that made 19 iterations reach 13 of 256 cards.
+    # the bug that made every pass replay the same anchors.
     store = KnowledgeStore(bank, seed=1701, blocks_per_epoch=2)
     per_epoch = [tuple(store.route(g, epoch=e).arm for g in range(4)) for e in range(4)]
     assert len(set(per_epoch)) > 1

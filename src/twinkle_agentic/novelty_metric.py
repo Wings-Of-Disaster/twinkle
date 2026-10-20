@@ -4,10 +4,10 @@
 Why this exists
 ---------------
 If the novelty term in a challenger reward comes from an LLM judge, measure it
-before trusting it. On two recorded runs it did not discriminate: over one run's
-1439 judged proposals 93% scored exactly 0, and 225 groups -- 66% -- had an
-identical score on all eight siblings. On a second run it was worse: 97.6% zeros,
-and 82.4% of 272 groups constant. GRPO subtracts the group mean and divides by
+before trusting it. On two recorded runs it did not discriminate: over 1439 judged
+proposals in one run, 93.3% scored exactly 0 and 66.2% of 225 groups scored
+identically on every sibling; over a second run's 4589, 98.5% scored 0 and 91.6%
+of 783 groups were constant. GRPO subtracts the group mean and divides by
 the group standard deviation, so a term that is constant across a group
 contributes **exactly zero gradient** -- not a small effect, a mathematically
 zero one. Those runs had a novelty term wired into the reward and the term did

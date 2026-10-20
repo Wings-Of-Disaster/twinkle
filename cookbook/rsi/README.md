@@ -132,9 +132,9 @@ nothing to match against.
 
 `twinkle_agentic.novelty_metric.NoveltyScorer` scores a group of sibling proposals
 against each other. It exists because a novelty term an LLM judge supplies can be
-measured, and on two recorded runs it measured badly: 93% and 97.6% of proposals
-scored exactly zero, and 66% and 82.4% of groups scored identically on all eight
-siblings. GRPO subtracts the group mean and divides by the group standard
+measured, and on two recorded runs it measured badly: 93.3% and 98.5% of
+proposals scored exactly zero (1439 and 4589 judged), and 66.2% and 91.6% of
+groups (225 and 783) scored identically on every sibling. GRPO subtracts the group mean and divides by the group standard
 deviation, so a term constant across a group contributes **exactly zero
 gradient**. Those runs had a novelty term in the reward and it did nothing.
 

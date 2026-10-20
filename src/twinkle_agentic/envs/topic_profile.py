@@ -60,10 +60,12 @@ logger = logging.getLogger(__name__)
 # Order within the list, and why:
 #   1. A capability the card was mined for beats a generic one. A card labelled
 #      `domain: sql` also matches the `data` regexes ("...Group-Level Analysis"),
-#      so python-compute is eligible for it too; ranking compute first routes
-#      every database card into a plain python slot. That is how a bank built to
-#      be a third database and a third web search produced 89.5% "write a CSV"
-#      tasks and no query tasks at all.
+#      so python-compute is eligible for it too, and ranking compute first routes
+#      it into a plain python slot. On one 429-card bank, 44 of the 332 switchable
+#      cards are eligible for both python-compute and a specific profile -- 13% of
+#      the routing decided by list order rather than by what the card was mined
+#      for, and each of those a database or retrieval topic landing in a general
+#      python slot.
 #   2. A profile backed by a real service beats one that simulates it inside the
 #      sandbox. db-analyst queries PostgreSQL through `world` with a
 #      per-episode provisioned account; sql-analytics answers the same

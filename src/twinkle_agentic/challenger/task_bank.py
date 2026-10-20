@@ -8,8 +8,8 @@ needs a file that outlives a run, which is what this is -- one JSON object per l
 appended by :meth:`add`, read back by the next run.
 
 The similarity used to pick which stored tasks to show the judge is 3-gram Jaccard over
-the statement. It is a weak measure and known to be: over one run's 188 kept statements
-the closest pair scored 0.060, so ranking by it is nearly ranking at random, and it
+the statement. It is a weak measure and known to be: over one run's 207 kept statements
+the closest pair scored 0.077, so ranking by it is nearly ranking at random, and it
 cannot see that two tasks with no shared wording are both 'write the given files
 verbatim, then derive one from them'. It is used only to CHOOSE the handful of tasks the
 judge reads, never to score novelty -- the judging is

@@ -142,12 +142,15 @@ class NoveltyScorer:
         self.calibrated: dict[str, float] | None = None
         if self.cluster_threshold is None:
             # The threshold is a property of the corpus, not a constant to choose.
-            # On one recorded run the within-group sibling cosine had a median of
-            # 0.25 and a p99 of 0.56, so a hand-picked 0.55 left 98% of proposals
-            # in singleton clusters and the spread term measured nothing. Taking
-            # the quantile of the observed distribution keeps the same reading --
-            # "the closest quarter of pairs are the same idea" -- on any corpus,
-            # with no number to re-tune when the wording shifts.
+            # Measured on two recorded runs: the within-group sibling cosine had a
+            # median of 0.046 and 0.044 and a p99 of 0.104 and 0.210, so a
+            # hand-picked 0.55 left *every* group entirely in singleton clusters
+            # (9 of 9 and 28 of 28) and the spread term measured nothing at all.
+            # Calibrating at the 0.75 quantile put the threshold at 0.056 and
+            # 0.059 -- about ten times lower. Taking the quantile of the observed
+            # distribution keeps the same reading, "the closest quarter of pairs
+            # are the same idea", on any corpus, with no number to re-tune when
+            # the wording shifts.
             pairs = self._pairwise(calibration_groups or [])
             if pairs:
                 pairs.sort()

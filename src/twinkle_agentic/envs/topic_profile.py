@@ -194,21 +194,31 @@ _SERVICE_BACKED = frozenset({'db-analyst@1'})
 
 
 def _service_reachable(profile_id: str, timeout: float = 2.0) -> bool:
-    """Whether the service behind a profile's host tools accepts a connection.
+    """Whether this host can actually serve a profile's tools.
 
-    A bare TCP connect, not a query: provisioning a real role just to test
-    reachability would create and leak a database account per import, and the
-    distinction this has to make is "is there a server here" and nothing finer.
+    Two conditions, and both are needed. A TCP connect answers "is there a server";
+    it does not answer "can we authenticate to it", which also needs the
+    provisioning module named by ``TWINKLE_WORLD_DB_MODULE``. Checking only the
+    first was measured to be wrong the expensive way: with a server listening and no
+    module configured, the profile stayed in the rotation and every ``db_query``
+    returned "cannot reach the shared database" -- each rollout scored 0, the group
+    landed out of band and was dropped, and 91 of 332 switchable cards went there.
+    A quarter of the groups burned, and what the proposer learned was that database
+    topics do not pay.
+
+    Still not a query: provisioning a real role per import would create and drop an
+    account every time this module loads.
     """
     if profile_id not in _SERVICE_BACKED:
         return True
-    if profile_id == 'db-analyst@1':
-        # The same two variables `world` connects with. Reading a different pair
-        # here would probe one host and then query another.
-        host = os.environ.get('TWINKLE_WORLD_DB_HOST', '127.0.0.1')
-        port = int(os.environ.get('TWINKLE_WORLD_DB_PORT', '5432'))
-    else:
+    if profile_id != 'db-analyst@1':
         return True
+    if not os.environ.get('TWINKLE_WORLD_DB_MODULE', ''):
+        return False
+    # The same two variables `world` connects with. Reading a different pair here
+    # would probe one host and then query another.
+    host = os.environ.get('TWINKLE_WORLD_DB_HOST', '127.0.0.1')
+    port = int(os.environ.get('TWINKLE_WORLD_DB_PORT', '5432'))
     import socket
     try:
         with socket.create_connection((host, port), timeout=timeout):

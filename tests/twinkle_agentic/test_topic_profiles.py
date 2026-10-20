@@ -217,3 +217,30 @@ def test_describe_counts_what_each_card_would_be_routed_to(affinities):
     # The prose card chose nothing, and describe() says so rather than hiding it
     # under the baseline.
     assert counts['stay-on-slot'] == 1
+
+
+def test_a_listening_server_without_a_provisioning_module_is_not_reachable(monkeypatch):
+    # The bug this pins: a TCP connect answers "is there a server", not "can we
+    # authenticate to it". With the server up and TWINKLE_WORLD_DB_MODULE unset the
+    # profile used to stay in the rotation, every db_query returned "cannot reach
+    # the shared database", every rollout scored 0, and the group was dropped --
+    # 91 of 332 switchable cards went there, so a quarter of the groups were
+    # burned and the proposer learned that database topics do not pay.
+    monkeypatch.setenv('TWINKLE_WORLD_DB_HOST', '127.0.0.1')
+    monkeypatch.setenv('TWINKLE_WORLD_DB_PORT', '5432')
+    monkeypatch.delenv('TWINKLE_WORLD_DB_MODULE', raising=False)
+    import socket
+    try:
+        with socket.create_connection(('127.0.0.1', 5432), timeout=0.5):
+            server_up = True
+    except OSError:
+        server_up = False
+    if not server_up:
+        pytest.skip('nothing listening on 127.0.0.1:5432, so "server up but module missing" cannot be set up')
+    # Server up, module missing -> unreachable. This is the case that used to pass.
+    assert tp._service_reachable('db-analyst@1', timeout=0.5) is False
+    assert 'db-analyst@1' not in TopicProfiles().rotation()
+    # Module named (its contents are not imported here, only its presence checked)
+    # and server up -> reachable.
+    monkeypatch.setenv('TWINKLE_WORLD_DB_MODULE', '/nonexistent-but-set')
+    assert tp._service_reachable('db-analyst@1', timeout=0.5) is True

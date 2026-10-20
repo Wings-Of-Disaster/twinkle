@@ -777,6 +777,17 @@ def main():
         ckpt_manager.sync_weights(merge_and_sync=True)
         sampler.reset_prefix_cache()
 
+    # One more ingest after the loop. The loop's own ingest sits below the
+    # `optim_step >= MAX_STEPS` break, so the last batch the challenger produced
+    # -- already recorded, already counted in n_kept -- never reaches the bank.
+    # Measured on a 2-step smoke run: 10 kept proposals in the recorder index, 7
+    # in tasks.jsonl. The bank is supposed to be the record of what a run trained
+    # on, and silently missing its final batch is exactly the gap a later run
+    # would re-propose into.
+    if task_bank is not None and SAVE_DIR:
+        added = task_bank.ingest_recorder(SAVE_DIR)
+        logger.info(f'[rsi] task bank final ingest: +{added}, {task_bank.stats()}')
+
     challenger.close()
     logger.info(f'Training completed. optim_steps={optim_step}')
     model.save('rsi-grpo-checkpoint', output_dir=OUTPUT_DIR)

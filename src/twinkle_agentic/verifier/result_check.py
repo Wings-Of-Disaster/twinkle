@@ -345,7 +345,7 @@ def _eval_one(check: Check, ctx: CheckContext) -> CheckOutcome:
                 return CheckOutcome(check, False, f'query failed: {e}')
         finally:
             conn.close()
-        want = [(tuple(r) if not isinstance(r, list) else tuple(r)) for r in check.expect_rows]
+        want = [tuple(row) for row in check.expect_rows]
         got = [tuple(r) for r in got]
         if not check.ordered:
             # Set comparison by default: SQL without ORDER BY has no guaranteed row
@@ -404,26 +404,7 @@ def _eval_one(check: Check, ctx: CheckContext) -> CheckOutcome:
 
 
 def _check_lean(check: Check, ctx: CheckContext) -> CheckOutcome:
-    """Grade a Lean submission by compiling it, and refuse the escape hatches.
-
-    The verification is the compiler, not a string match on the proof text: Lean
-    decides what is true, and the same file that proves a theorem here proves it
-    for anyone. A regex over `:= by ring` would be a guess about what a proof
-    looks like, and would accept a proof of the wrong statement.
-
-    TWO THINGS THIS HAS TO DO THAT A PLAIN COMPILE DOES NOT
-    -------------------------------------------------------
-    1. Refuse `sorry` and `admit`. Lean reports them as *warnings* and exits 0,
-       so `theorem t : False := by sorry` compiles cleanly. Graded on the exit
-       code alone, that is a full-credit answer to any question, and a policy
-       that finds it stops writing proofs entirely. Measured before this was
-       written: the first version of the grader accepted exactly that.
-    2. Check the declaration is actually present. A file that compiles but
-       never states the theorem is a proof of nothing; the name is required.
-
-    The check runs in the episode's own environment, so it sees the workspace the
-    episode left behind rather than a copy taken beforehand.
-    """
+    """Compile in the episode environment, reject sorry warnings and require a named declaration."""
     if ctx.env is None:
         # Compiling needs the sandbox: the toolchain lives there, not here. A
         # check that silently ran locally would grade a different machine's PATH
@@ -431,7 +412,9 @@ def _check_lean(check: Check, ctx: CheckContext) -> CheckOutcome:
         return CheckOutcome(check, False, 'lean checks require an environment to compile in')
     project = check.lean_project or '.'
     # `lean_env` is set by the image; the grader reads it the same way.
-    script = _LEAN_GRADER.format(project=_shquote(project), path=_shquote(check.path), theorem=_shquote(check.theorem))
+    theorem_pattern = r'(theorem|lemma)[[:space:]]+' + re.escape(check.theorem) + r'([[:space:]:]|$)'
+    script = _LEAN_GRADER.format(
+        project=_shquote(project), path=_shquote(check.path), theorem_pattern=_shquote(theorem_pattern))
     try:
         code, out = ctx.env.run_script(script, 'shell', check.timeout)
     except Exception as e:  # noqa: BLE001
@@ -447,8 +430,8 @@ def _check_lean(check: Check, ctx: CheckContext) -> CheckOutcome:
 # quoting of the three substituted values happens in one place.
 _LEAN_GRADER = """
 export PATH="${{LEAN_PREFIX:-/opt/lean}}/bin:$PATH"
-cd {project} 2>/dev/null || {{ echo "no lean project at {project}"; exit 2; }}
-[ -f {path} ] || {{ echo "no submission at {path}"; exit 2; }}
+cd {project} 2>/dev/null || {{ echo "lean project not found"; exit 2; }}
+[ -f {path} ] || {{ echo "submission not found"; exit 2; }}
 out=$(lake env lean {path} 2>&1); status=$?
 # Checked before the exit code: sorry exits 0, so the exit code alone cannot
 # distinguish a proof from a placeholder.
@@ -457,8 +440,8 @@ if printf '%s' "$out" | grep -qE 'declaration uses .sorry.|sorryAx'; then
 fi
 [ $status -eq 0 ] || {{ echo "$out" | head -20; exit 1; }}
 # A file can compile without ever stating the theorem; that is not a proof of it.
-grep -qE '(theorem|lemma)[[:space:]]+{theorem}([[:space:]]|$)' {path} \
-  || {{ echo "compiles, but never declares {theorem}"; exit 1; }}
+grep -qE {theorem_pattern} {path} \
+  || {{ echo "compiles, but named declaration not found"; exit 1; }}
 echo "accepted"
 """
 

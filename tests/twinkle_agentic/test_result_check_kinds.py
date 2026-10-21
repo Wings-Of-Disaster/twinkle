@@ -329,6 +329,30 @@ def test_lean_reports_a_missing_toolchain_as_a_failure_not_a_crash(tmp_path):
     assert isinstance(result.detail, str) and result.detail
 
 
+@pytest.mark.parametrize('declaration,expected', [('fooXbar', False), ('foo.bar', True)])
+def test_lean_declaration_names_are_literal_and_paths_are_quoted(tmp_path, declaration, expected):
+    # Stub only the compiler; exercise the actual shell grader and declaration check.
+    prefix = tmp_path / 'toolchain'
+    (prefix / 'bin').mkdir(parents=True)
+    lake = prefix / 'bin' / 'lake'
+    lake.write_text('#!/bin/sh\nexit 0\n')
+    lake.chmod(0o755)
+    project = tmp_path / "project with 'quotes'"
+    project.mkdir()
+    (project / 'Proof with spaces.lean').write_text(f'theorem {declaration} : True := by trivial\n')
+    env = LocalEnv(workspace=str(project), envs={'LEAN_PREFIX': str(prefix)})
+    check = Check(kind='lean', path='Proof with spaces.lean', theorem='foo.bar', lean_project=str(project))
+    assert outcome(check, env=env).passed is expected
+
+
+def test_lean_missing_path_is_reported_without_shell_expansion(tmp_path):
+    env = LocalEnv(workspace=str(tmp_path))
+    check = Check(kind='lean', path='$(touch expanded).lean', theorem='t')
+    result = outcome(check, env=env)
+    assert not result.passed
+    assert not (tmp_path / 'expanded').exists()
+
+
 # --------------------------------------------------------------- hidden_python
 
 

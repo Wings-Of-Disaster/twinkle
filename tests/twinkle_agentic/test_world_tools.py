@@ -279,6 +279,28 @@ def test_sql_and_doc_calls_produce_no_receipt(env):
 # -------------------------------------------------------------------- lifetime
 
 
+def test_world_forks_keep_receipts_and_roles_separate(env):
+    first = env.world.fork(db_enabled=True)
+    second = env.world.fork()
+    first.call('fetch_page', {'url': 'https://example.com/missing'})
+    assert len(first.receipts) == 1
+    assert second.receipts == env.world.receipts == []
+    first._db_creds = {'role': 'first'}
+    assert second._db_creds is None
+    assert first.db_enabled and not second.db_enabled
+    assert first.docs is second.docs
+
+
+def test_owned_world_state_is_cleared_between_episodes(env):
+    env._release_world_on_close = True
+    released = []
+    env.world.release = lambda: released.append(True)
+    env.step('fetch_page', {'url': 'https://example.com/missing'})
+    env.clear()
+    assert released == [True]
+    assert env.world.receipts == []
+
+
 def test_close_does_not_release_a_shared_world(env):
     released = []
     env.world.release = lambda: released.append(True)

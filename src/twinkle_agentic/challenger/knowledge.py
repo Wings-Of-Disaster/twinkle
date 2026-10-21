@@ -1,5 +1,5 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""Deterministic packet routing for the agentic RSI experiment."""
+"""Knowledge-card loading, provenance validation and deterministic knowledge/control routing."""
 
 from __future__ import annotations
 
@@ -560,21 +560,6 @@ class KnowledgeStore:
         return cards
 
     def route(self, group_id: int, epoch: int = 0) -> KnowledgeRoute:
-        # ``epoch`` is the training iteration, and it has to drive the routing. A
-        # loop that builds a fresh challenger per iteration restarts its group
-        # counter at zero, so without the epoch the draw is a pure function of the
-        # group index and every iteration replays the identical arm sequence and
-        # the identical cards. Coverage then stops being a property of the run and
-        # becomes a property of the counter's period, and tasks get easier each
-        # iteration only because the policy keeps meeting the same ones. The arm is hashed on it; the anchor advances a
-        # cursor through the bank, which is what turns 5% coverage into most of
-        # the bank over a run instead of a chance-dependent fraction of it.
-        # ``block`` is the block *within the epoch*, which is what ``cursor =
-        # epoch * blocks_per_epoch + block`` in _anchor_index assumes. Taking the
-        # remainder is a no-op for a caller whose group_id restarts each
-        # iteration -- there block is already below blocks_per_epoch -- and it is
-        # what makes a caller with one global counter walk the bank instead of
-        # aliasing back onto the first blocks_per_epoch anchors forever.
         block = (group_id // len(KNOWLEDGE_ARMS)) % self.blocks_per_epoch
         offset = group_id % len(KNOWLEDGE_ARMS)
         arm_rng = random.Random(_sha256({'seed': self.seed, 'block': block, 'epoch': epoch, 'kind': 'arm'}))
@@ -592,32 +577,11 @@ class KnowledgeStore:
 
 
 class KnowledgeCardSeeder:
-    """Route one knowledge card per proposing round, or nothing at all.
+    """Adapt KnowledgeStore to the no-argument cookbook Seeder protocol.
 
-    Shaped for the ``Seeder`` protocol in ``cookbook/rsi/seed/base.py`` -- a
-    ``__call__`` returning text or ``None`` -- without importing it, so the
-    routing stays testable from here and the cookbook only has to re-export.
-
-    ``__call__`` takes no arguments and the routing wants two: which group this
-    is, and which epoch. Both are derived from a call counter, so a caller can
-    use this exactly like any other seeder and still get the coverage property:
-
-    * ``group_id`` is the call index. Consecutive calls fall in the same block
-      until the block is full, and the arms inside a block are what differ, so
-      one block is a matched pair rather than two unrelated draws.
-    * ``epoch`` advances every ``blocks_per_epoch`` blocks. It has to move,
-      because it is what the arm order and the anchor cursor are hashed on: with
-      it fixed, every pass replays the identical sequence.
-
-    A caller that knows the iteration -- a loop that builds a fresh challenger
-    per step -- should say so with :meth:`set_epoch` rather than let the counter
-    infer it. The two agree only when every round of every iteration asks for a
-    seed exactly once.
-
-    A round routed to the ``base_open`` arm returns ``None``, which a challenger
-    reads as "propose from scratch". That is the control half of the comparison
-    and it needs no special handling: the protocol already has a meaning for
-    offering nothing.
+    Calls advance through matched knowledge/control groups; control returns None.
+    By default the epoch advances from the call count. set_epoch() pins it for
+    callers that rebuild a seeder each training iteration.
     """
 
     def __init__(self, store: KnowledgeStore, epoch: int | None = None) -> None:
@@ -628,12 +592,7 @@ class KnowledgeCardSeeder:
 
     @property
     def last_route(self) -> KnowledgeRoute | None:
-        """The route the most recent call produced, for a run's own log.
-
-        Kept here rather than returned, because a seeder returns text and
-        nothing else; a run that wants the arm, the anchor and the bank digest
-        alongside the task it produced reads them off this.
-        """
+        """Return metadata for the latest call without changing the text-only Seeder protocol."""
         return self._last
 
     def set_epoch(self, epoch: int) -> None:

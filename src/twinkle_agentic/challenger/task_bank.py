@@ -1,22 +1,5 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""A file of the tasks earlier iterations already produced, to compare new ones against.
-
-Novelty is meaningless without something to be novel against. Within one run the
-proposals of a group can be compared to each other, but the failure this is for is
-slower than that: iteration k+1 re-proposing what iteration k already trained on. That
-needs a file that outlives a run, which is what this is -- one JSON object per line,
-appended by :meth:`add`, read back by the next run.
-
-The similarity used to pick which stored tasks to show the judge is 3-gram Jaccard over
-the statement. It is a weak measure and known to be: over one run's 207 kept statements
-the closest pair scored 0.077, so ranking by it is nearly ranking at random, and it
-cannot see that two tasks with no shared wording are both 'write the given files
-verbatim, then derive one from them'. It is used only to CHOOSE the handful of tasks the
-judge reads, never to score novelty -- the judging is
-:mod:`twinkle_agentic.verifier.rubric_score`, whose criteria compare task shapes. Even a
-near-random pick gives the judge real tasks from the same generator to compare against,
-which is what the criteria need.
-"""
+"""Persist kept task statements and select similar references with 3-gram Jaccard overlap."""
 import json
 import os
 import re
@@ -92,13 +75,7 @@ class TaskBank:
             return list(self._statements)
 
     def sibling_groups(self, minimum: int = 2) -> List[List[str]]:
-        """Stored statements grouped by the group that produced them.
-
-        Only groups of ``minimum`` or more, because a group of one has no sibling
-        pair and says nothing about how close two proposals have to be before they
-        are the same idea. This is the calibration set for
-        :class:`twinkle_agentic.novelty_metric.NoveltyScorer`.
-        """
+        """Return stored groups with at least minimum siblings for novelty calibration."""
         with self._lock:
             by_group: Dict[Any, List[str]] = {}
             for group_id, statement in zip(self._group_ids, self._statements):
@@ -106,14 +83,7 @@ class TaskBank:
         return [members for members in by_group.values() if len(members) >= minimum]
 
     def references(self, statement: str, extra: Sequence[str] = ()) -> List[str]:
-        """The stored statements most similar to ``statement``, closest first.
-
-        ``extra`` is prepended and never dropped -- it is how the proposals of the
-        current group get in front of the judge. Without them a whole group can be
-        scored identically novel against history while being eight versions of one
-        idea, and GRPO subtracts the group mean, so an identical term across the
-        group produces no gradient at all.
-        """
+        """Prepend extra sibling statements, then return the closest historical references."""
         with self._lock:
             pairs = list(zip(self._statements, self._grams))
         target = grams(statement)
@@ -124,12 +94,7 @@ class TaskBank:
         return out
 
     def add(self, statement: str, check: str = '', **fields: Any) -> bool:
-        """Append one task. Returns False if the statement is already stored.
-
-        Appended immediately rather than at the end of the run: a run that crashes
-        after 60 of 80 tasks should still contribute those 60, or the bank silently
-        under-reports what has been trained on.
-        """
+        """Append a non-empty, previously unseen statement immediately; return whether it was added."""
         statement = (statement or '').strip()
         if not statement:
             return False
@@ -150,29 +115,10 @@ class TaskBank:
         return True
 
     def ingest_recorder(self, save_dir: str, outcomes: Sequence[str] = ('kept', )) -> int:
-        """Add the statements a challenger run's own recorder already wrote.
+        """Ingest selected outcomes from save_dir/trajs/index.jsonl.
 
-        ``AgenticChallenger`` records every proposal -- statement, check script and
-        outcome -- to ``<save_dir>/trajs/index.jsonl`` as it goes. Reading that
-        rather than hooking the challenger is what lets a bank be filled without
-        the challenger knowing a bank exists, and it is what makes a resumed run's
-        history available at once instead of only after it re-proposes all of it.
-
-        Safe to call as often as the loop likes: :meth:`add` dedupes on the
-        statement, so an ingest-every-iteration call appends each task once.
-
-        Args:
-            save_dir: the challenger's ``save_dir``, not the ``trajs`` directory
-                inside it. Named the same way the challenger names it so the two
-                cannot drift.
-            outcomes: which recorder outcomes count as a task worth comparing
-                against. ``kept`` by default: a proposal rejected for a broken
-                check is not a task anybody trained on, and showing it to the
-                judge as one would make novelty look achieved by re-proposing
-                failures.
-
-        Returns:
-            How many statements were new to this bank.
+        Defaults to kept proposals. Repeated calls deduplicate statements, so startup,
+        per-iteration and final ingestion can share this path. Returns new statements.
         """
         index_path = os.path.join(save_dir, 'trajs', 'index.jsonl')
         if not os.path.isfile(index_path):

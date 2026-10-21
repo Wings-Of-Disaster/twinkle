@@ -1,64 +1,11 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""A novelty score a program can compute, for a group of sibling proposals.
+"""Compute TF-IDF novelty among sibling proposals without a model call.
 
-Why this exists
----------------
-If the novelty term in a challenger reward comes from an LLM judge, measure it
-before trusting it. On two recorded runs it did not discriminate: over 1439 judged
-proposals, 93.3% scored exactly 0 and 66.2% of 225 groups scored identically on
-every sibling; over a second run's 4589 judged proposals, 98.5% scored 0 and 91.6%
-of 783 groups were constant. GRPO subtracts the group mean and divides by
-the group standard deviation, so a term that is constant across a group
-contributes **exactly zero gradient** -- not a small effect, a mathematically
-zero one. Those runs had a novelty term wired into the reward and the term did
-nothing.
-
-:func:`constant_group_rate` is how that was measured, and it is exported so any
-replacement has to be judged the same way.
-
-What replaces it
-----------------
-Two things a program can measure, both computed **inside the group**, because
-that is the contrast GRPO actually uses:
-
-``distance``
-    ``1 - max cosine`` to the most similar sibling. Answers "is there anyone in
-    this group I am a near-duplicate of". High when a proposal is the odd one
-    out, low when it is one of eight versions of one idea.
-``spread``
-    ``1 / cluster size``, where siblings closer than ``cluster_threshold`` to
-    each other are one cluster. Answers "how many of us are the same idea",
-    which the max-cosine term alone can miss: five near-identical proposals all
-    have a low distance, but they are not eight different proposals.
-
-The vectoriser is fitted on the whole corpus of statements from the run, not on
-one group. That detail is load-bearing: these statements share their scaffolding
-almost verbatim (``## Task:``, ``### Raw Input``, ``Create the file``), and IDF
-fitted per group would give that boilerplate the highest weight of anything in
-the text. Fitted across the run, a phrase that appears in every statement
-carries almost no weight and the cosine reflects the content.
-
-Nothing here is a model or a GPU: TF-IDF over word n-grams plus a union-find over
-a threshold is a few milliseconds per group, so it can run inside the loop on
-every proposal without touching the sampler.
-
-One consequence of fitting on the corpus is worth stating rather than
-discovering: ``TfidfVectorizer`` drops tokens absent from the vocabulary it was
-fitted on, so a word the corpus never used is invisible to the score. Inside a
-run the corpus is every statement produced so far and the group being scored is a
-subset of it, which is the intended arrangement. A caller that fits on one run
-and scores another gets a scorer that cannot see the difference.
-
-The calibration set is :meth:`~twinkle_agentic.challenger.task_bank.TaskBank.sibling_groups`,
-which is why that method exists and why it keeps a group id per statement.
-
-Dependencies
-------------
-``scikit-learn`` and ``numpy``, both imported inside the methods that need them
-rather than at module scope. A run that never scores novelty pays neither, and
-an environment without scikit-learn can still import this module, read
-:func:`constant_group_rate` over recorded scores, and find out what is missing
-only at the point it asks for a scorer.
+Fit on the full run corpus so shared scaffolding receives little IDF weight.
+Distance is one minus the closest sibling cosine; spread is inverse cluster
+size. The cluster threshold can be calibrated on observed sibling groups.
+Out-of-vocabulary tokens are invisible, so fit on the run being scored.
+scikit-learn and numpy are imported lazily. No reward integration is provided.
 """
 from __future__ import annotations
 
@@ -86,27 +33,11 @@ def _union_find_components(n: int, edges) -> list[int]:
 
 
 class NoveltyScorer:
-    """Scores sibling proposals against each other. Fit once, score many.
+    """Fit on corpus, then score sibling groups using distance and spread.
 
-    Args:
-        corpus: every statement the run has produced, or any large sample of
-            them. Used only to weight the n-grams; it is not a reference set, and
-            the score never compares a proposal against it.
-        ngram_range: word n-grams for the vectoriser. ``(1, 2)`` keeps common
-            compounds together without the sparsity of longer n-grams on texts
-            that run to 1.6k characters.
-        max_features: cap on the vocabulary.
-        cluster_threshold: cosine at or above which two siblings are one cluster.
-            Omit to calibrate it from ``calibration_groups``.
-        cluster_quantile: which quantile of the observed sibling cosines becomes
-            the threshold when one is not given.
-        calibration_groups: groups of sibling statements, i.e. what
-            :meth:`TaskBank.sibling_groups` returns.
-        weight_distance: weight of the ``distance`` term.
-        weight_spread: weight of the ``spread`` term. The two are separate
-            signals, so the blend is explicit rather than baked into one formula.
-        sublinear_tf: damp term frequency, which matters when one statement
-            repeats a phrase the others use once.
+    cluster_threshold overrides quantile calibration from calibration_groups.
+    weight_distance and weight_spread control the blend; ngram_range,
+    max_features and sublinear_tf configure TF-IDF.
     """
 
     def __init__(self,
@@ -141,16 +72,6 @@ class NoveltyScorer:
         self.n_features = len(self.vectoriser.vocabulary_)
         self.calibrated: dict[str, float] | None = None
         if self.cluster_threshold is None:
-            # The threshold is a property of the corpus, not a constant to choose.
-            # Measured on two recorded runs: the within-group sibling cosine had a
-            # median of 0.046 and 0.044 and a p99 of 0.104 and 0.210, so a
-            # hand-picked 0.55 left *every* group entirely in singleton clusters
-            # (9 of 9 and 28 of 28) and the spread term measured nothing at all.
-            # Calibrating at the 0.75 quantile put the threshold at 0.056 and
-            # 0.059 -- about ten times lower. Taking the quantile of the observed
-            # distribution keeps the same reading, "the closest quarter of pairs
-            # are the same idea", on any corpus, with no number to re-tune when
-            # the wording shifts.
             pairs = self._pairwise(calibration_groups or [])
             if pairs:
                 pairs.sort()

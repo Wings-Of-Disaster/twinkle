@@ -1,5 +1,11 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""Immutable sandbox profile manifests and least-privilege resolution."""
+"""Validated profile manifests, tool allowlists and reproducible workspace setup.
+
+Compose ProfiledEnvMixin before WorldToolsMixin and the base environment.
+Aliases such as glob -> run_command grant the full command tool; they are
+not fine-grained shell permissions. Setup templates use literal replacement
+of {workspace!r} so dictionaries and comprehensions remain valid Python.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -230,11 +236,6 @@ def default_profile_registry() -> ProfileRegistry:
         ))
     registry.register(
         SandboxProfile(
-            # agentenv, not a new `lean` session kind: the compiler runs inside the
-            # sandbox through the same shell the other profiles use, so there is
-            # nothing for a new kind to enable. `session_kind='lean'` was rejected by
-            # open_profile_session outright, which made the profile unreachable
-            # regardless of whether Lean itself worked.
             name='lean-proof',
             version=1,
             session_kind='agentenv',
@@ -266,12 +267,6 @@ def default_profile_registry() -> ProfileRegistry:
             setup_manifest=('clear_workspace', 'python-test-runner-canary'),
             runtime_ref='twinkle-rsi-msagent',
         ))
-    # ------------------------------------------------------------------
-    # Seeded profiles. Each one starts the agent from a real state instead of an
-    # empty directory, so the task can require reading before acting. The setup
-    # manifest names the seed program that builds it (seeds.py) and then
-    # the canary that proves the state is usable.
-    # ------------------------------------------------------------------
     registry.register(
         SandboxProfile(
             name='sql-analytics',
@@ -351,15 +346,6 @@ def default_profile_registry() -> ProfileRegistry:
             name='world-forensics',
             version=1,
             session_kind='agentenv',
-            # The seeded profile that also reads the SHARED world. The distinction
-            # matters: sql-analytics copies a database into the workspace, so the model
-            # reads a private file. This one reads a dataset it never receives -- the
-            # call is answered on the training host, so nothing is copied in and the
-            # sandbox still has no network.
-            #
-            # That is what makes the answer unfakeable. A seeded file can be opened,
-            # edited, and reasoned about as local material; a shared one can only be
-            # queried, and what comes back is what the world holds.
             capabilities=('database_query', 'document_retrieval', 'log_analysis'),
             task_forms=('incident_analysis', 'cross_source_reconciliation'),
             allowed_tools=('shell_executor', 'python_executor', 'read_file', 'write_file', 'glob', 'grep', 'world_sql',
@@ -378,11 +364,6 @@ def default_profile_registry() -> ProfileRegistry:
             name='db-analyst',
             version=1,
             session_kind='agentenv',
-            # Reads a REAL PostgreSQL service over the network, with an account the
-            # service issues to this episode alone. Different from world-forensics,
-            # which reads a SQLite file that ships with the run: here the model has to
-            # connect to infrastructure and stay inside the grant it was handed, and
-            # the grant is enforced by PostgreSQL rather than by the sandbox.
             capabilities=('database_query', 'database_schema'),
             task_forms=('database_analysis', 'grant_aware_query'),
             allowed_tools=('shell_executor', 'python_executor', 'read_file', 'write_file', 'glob', 'grep', 'db_query',
@@ -400,25 +381,8 @@ def default_profile_registry() -> ProfileRegistry:
             name='web-research',
             version=1,
             session_kind='agentenv',
-            # Now agentenv rather than broker: the search tools are answered on the
-            # training host, exactly like the world tools, so there is no separate
-            # session kind to enable and no sandbox network to open. The broker kind
-            # was never implemented (`open_profile_session` rejects it outright), so
-            # the profile used to be unavailable for a reason that had nothing to do
-            # with search providers -- it was unreachable by construction.
             capabilities=('web_search', 'web_fetch', 'citation'),
             task_forms=('web_research', 'source_verification'),
-            # Both search tools, not just `web_search`. An earlier design served
-            # them from inside the sandbox, where only one existed, so `fetch_page`
-            # was dropped from this list and no profile could reach it. They are
-            # answered on the training host now (world.SEARCH_TOOL_SCHEMAS), so
-            # both are advertised and both are allowed.
-            #
-            # `fetch_page` is the half that makes `web_receipt` worth scoring: a
-            # search result carries an excerpt, and a policy can quote an excerpt
-            # it was shown without ever reading the page. Requiring the source to
-            # have been fetched is what separates "cited what it read" from
-            # "cited what it was handed".
             allowed_tools=('shell_executor', 'python_executor', 'read_file', 'write_file', 'glob', 'grep', 'web_search',
                            'fetch_page'),
             # web_receipt is the one that matters here: it checks a cited url against
@@ -457,19 +421,6 @@ def default_profile_registry() -> ProfileRegistry:
     return registry
 
 
-# A profile names tools in the vocabulary of the agent runtime that served them,
-# which is finer than what an Env declares: `shell_executor`, `python_executor`,
-# `glob` and `grep` are four names there and one `run_command` here. The table is
-# data rather than logic so the coarseness is visible in one place instead of
-# being spread across conditionals.
-#
-# The consequence is worth stating plainly: on an Env whose only command tool is
-# `run_command`, a profile that allows `glob` allows a shell. Least privilege at
-# the granularity these profiles were written for needs an environment that
-# declares the finer tools; what this mixin guarantees on a coarse one is that
-# nothing outside the profile is reachable at all.
-# The one placeholder a seed program may contain. Kept as a literal so the
-# substitution below is exact and leaves every other brace alone.
 _WORKSPACE_PLACEHOLDER = '{workspace!r}'
 
 TOOL_ALIASES: dict[str, tuple[str, ...]] = {
@@ -493,30 +444,7 @@ def env_names_for(profile: SandboxProfile) -> frozenset:
 
 
 class ProfiledEnvMixin:
-    """Restrict an environment to what a profile permits, and seed its workspace.
-
-    Mix in front of any :class:`~twinkle_agentic.envs.base.Env`, and ahead of
-    :class:`~twinkle_agentic.envs.world.WorldToolsMixin` when both are used, so
-    that the world's tools are filtered by the profile too::
-
-        class Slot(ProfiledEnvMixin, WorldToolsMixin, LocalEnv):
-            pass
-
-    Three things it does:
-
-    * :meth:`tools` advertises only what the active profile allows, so a policy
-      is never offered a tool it would be refused.
-    * :meth:`step` and :meth:`step_batch` refuse anything else, because
-      advertising is not enforcement -- a policy can name a tool it was not
-      shown.
-    * :meth:`switch_profile` moves the environment onto another profile and runs
-      that profile's setup manifest, which is what puts the fixture in the
-      workspace before the episode starts.
-
-    With no profile set the environment behaves exactly as it did before: every
-    declared tool is advertised and nothing is refused. That is what makes this
-    safe to mix into an environment whose caller has no profiles.
-    """
+    """Filter tools and dispatch by profile; clear() prepares its workspace fixtures."""
 
     def __init__(self,
                  *args: Any,
@@ -543,12 +471,7 @@ class ProfiledEnvMixin:
         return list(self._manifest_results)
 
     def switch_profile(self, profile_id: str) -> SandboxProfile:
-        """Move onto ``profile_id`` and run its setup manifest.
-
-        Raises rather than degrading: an environment left on the wrong profile
-        produces tasks whose fixture is missing, and every one of them reads as a
-        hard task rather than as a broken slot.
-        """
+        """Select an available profile and run its setup; reject retired or unknown profiles."""
         profile = self._profiles.get(profile_id)
         if not profile.available:
             raise ValueError(f'profile {profile_id!r} is not available: {profile.unavailable_reason}')
@@ -611,11 +534,7 @@ class ProfiledEnvMixin:
         return [r if r is not None else StepResult(observation='Error: no result') for r in out]
 
     def clear(self) -> None:
-        """Empty the workspace, then run the active profile's setup manifest.
-
-        Order matters and is the reason this overrides rather than supplements:
-        a seed written before the clear is a seed deleted by it.
-        """
+        """Clear the workspace before running the active profile's setup manifest."""
         super().clear()
         if self._profile is None:
             return
@@ -627,19 +546,9 @@ class ProfiledEnvMixin:
         for step in self._profile.setup_manifest:
             source = self._manifest_step(step)
             if source is None:
-                # Raise rather than record and carry on: a manifest step that
-                # does not resolve is a typo in the profile, and continuing
-                # would leave the environment missing the fixture every task
-                # built on it assumes. Each of those then reads as an unsolvable
-                # task instead of as a broken profile.
                 raise RuntimeError(f'profile {self._profile.profile_id} names an unknown setup '
                                    f'step {step!r}; known steps are clear_workspace, '
                                    f'{sorted(SEED_PROGRAMS)} and {sorted(LIBRARY_CANARIES)}')
-            # The seed programs are templates, not source: each names the
-            # workspace it is to build in. Substituted by exact replacement
-            # rather than str.format, because the programs are real python and
-            # contain set and dict comprehensions whose braces format() would
-            # read as replacement fields.
             exit_code, output = self.run_script(source.replace(_WORKSPACE_PLACEHOLDER, repr(workspace)), 'python')
             self._manifest_results.append((step, exit_code, output))
             if exit_code != 0:

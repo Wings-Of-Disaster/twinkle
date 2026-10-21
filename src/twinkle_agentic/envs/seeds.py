@@ -1,32 +1,7 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""Initial state for sandbox profiles -- the programs that seed a workspace.
+"""Workspace fixture programs and dependency canaries used by sandbox profiles.
 
-Why this exists
----------------
-Every task this loop used to generate started from an EMPTY directory. The solver
-prompt says so out loud ("Your working directory starts COMPLETELY EMPTY. Every
-file the task mentions -- including files it describes as inputs -- does not exist
-yet"), which means an empty-workspace task asks the model to invent its own inputs
-and then compute over them. Grading that measures self-consistency as much as
-capability: the numbers were the model's own choice, so being right about them is
-a weaker claim than being right about data someone else fixed.
-
-These programs give a profile a real starting state instead. They run through the
-sandbox's own python tool after ``clear_workspace`` and before the agent sees
-anything, so the agent must READ a schema, a file, or a repo before it can act.
-
-Two rules every seed here follows
----------------------------------
-1. **Byte-deterministic.** The same seed must produce identical bytes, because two
-   rollouts of one task are graded against the same input. No ``random``, no clock,
-   no locale-dependent formatting, no dict-iteration-order dependence.
-2. **Idempotent.** Re-running replaces rather than appends, so a resumed or retried
-   episode cannot inherit half of a previous seed.
-
-Neither of these is the same as "easy". ``seed-sql-analytics`` plants a NULL region
-and a duplicate order; ``seed-csv-dirty`` writes a BOM and a quoted comma;
-``seed-docs-corpus`` includes a document that states the *superseded* answer. The
-difficulty is in the data, not in a missing tool.
+Replace only the literal {workspace!r} token when executing a program.
 """
 
 __all__ = ['CLEAR_WORKSPACE', 'LIBRARY_CANARIES', 'SEED_PROGRAMS']
@@ -40,14 +15,6 @@ LIBRARY_CANARIES = {
     'python-test-runner-canary': 'import unittest\nprint("profile canary ok")',
 }
 
-# Emptied through the python tool rather than `rm -rf`: ms-agent's safety policy
-# rejects `rm -rf`, and it rejects globs in write operations, which rules out
-# `find -delete`. The assert is what makes a future policy change surface as a
-# failed reset instead of one episode inheriting another's workspace.
-#
-# Lives here, not in sandbox.py, because sandbox.py already imports from episode.py
-# and episode.py needs this constant -- keeping it beside the seeds is what stops
-# that pair from becoming a cycle.
 CLEAR_WORKSPACE = '''
 import os, shutil
 root = {workspace!r}

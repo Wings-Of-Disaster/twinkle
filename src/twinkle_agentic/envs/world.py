@@ -1,78 +1,24 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""A read-only world served from the training host, not from the sandbox.
+"""Host-served read-only SQLite, document and search tools.
 
-An agentic RSI run needs tasks whose answers the policy cannot invent. A task
-that says "report the failure rate in the ops database" is only a real task if
-the database exists and the policy has to read it; otherwise the policy writes
-plausible numbers and a check that compares strings passes either way.
+TWINKLE_WORLD_ROOT names a bundle containing manifest.json, ops.db and docs/.
+TWINKLE_WORLD_SEARCH_ROOT optionally names a hashed corpus.json bundle.
+TWINKLE_WORLD_SEARCH_BACKEND selects corpus (default) or a live backend.
+For live search, TWINKLE_WORLD_SEARCH_MODULE contains search_backend.py with
+Backend.web_search(query, num_results, freshness) and fetch_page(url, query),
+both returning observation strings.
 
-This module is that world: a SQLite database, a document set, and a search
-corpus, exposed as tools the model calls exactly like the sandbox's own.
+Database tools require db_enabled and TWINKLE_WORLD_DB_MODULE containing
+provision(host, port, ttl=...) -> credentials and drop(role). Host, port and
+lease use TWINKLE_WORLD_DB_HOST / _PORT / _LEASE, defaulting to
+127.0.0.1 / 5432 / 21600. The deployment supplies permissions and credentials.
 
-Why host-side
--------------
-A tool call already round-trips. :meth:`Env.step_batch` hands the call to the
-environment and brings the answer back, so the training host sees every call
-before and after the sandbox does. A tool that lives on the host therefore needs
-no network path *into* the sandbox, which is what makes this the right place:
-
-* no egress from the sandbox. An environment configured with no network keeps
-  that property: a model that could reach the host's network could scan it, a
-  model that can only call a named tool cannot;
-* no reverse tunnel and no new listening port to defend;
-* the data never enters the sandbox, so it cannot be edited, copied out of
-  scope, or left behind in a snapshot.
-
-The cost is one extra hop, and it is not on the hot path: a tool call is already
-a sandbox round trip, and this one answers from a local read-only handle.
-
-What the model sees
--------------------
-Seven tools, in three groups, advertised like any other:
-
-``world_sql`` / ``world_schema`` / ``world_doc``
-    read-only SQL over ``ops.db``, its schema, and the document set.
-``web_search`` / ``fetch_page``
-    retrieval over a frozen corpus, or a live engine if one is configured.
-``db_query`` / ``db_schema``
-    a real SQL server, on a per-episode role rather than a shared login.
-
-Every retrieval answer is recorded as a *receipt* (:attr:`HostWorld.receipts`).
-That is what makes a citation checkable: ``web_receipt`` in
-:mod:`twinkle_agentic.verifier.result_check` can ask "was this url actually
-served to this episode?" and get an answer from what happened rather than from
-what the policy wrote down.
-
-Configuration is by environment variable, because a library does not guess where
-its data lives:
-
-=============================== ============================================
-``TWINKLE_WORLD_ROOT``          directory holding ``manifest.json``, ``ops.db``
-                                and ``docs/``. Required; without it
-                                :attr:`HostWorld.available` is False.
-``TWINKLE_WORLD_SEARCH_ROOT``   directory holding ``corpus.json`` and its
-                                ``manifest.json``. Optional; without it the two
-                                search tools report themselves unavailable.
-``TWINKLE_WORLD_SEARCH_BACKEND````corpus`` (default) or ``live``.
-``TWINKLE_WORLD_SEARCH_MODULE`` directory holding ``search_backend.py``.
-                                Required when the backend is ``live``.
-``TWINKLE_WORLD_DB_MODULE``     directory holding the ``provision`` module that
-                                mints and drops per-episode database roles.
-                                Required only when ``db_enabled``.
-``TWINKLE_WORLD_DB_HOST``       database host, default ``127.0.0.1``.
-``TWINKLE_WORLD_DB_PORT``       database port, default ``5432``.
-``TWINKLE_WORLD_DB_LEASE``      role lease seconds, default ``21600``.
-=============================== ============================================
-
-A live search backend is a plug-in rather than a dependency: the world imports
-``search_backend`` from ``TWINKLE_WORLD_SEARCH_MODULE`` and calls
-``Backend().web_search(query, num_results, freshness)`` and
-``Backend().fetch_page(url, query)``, both returning the observation string the
-tool shows the model. Which provider sits behind that class is the deployment's
-choice, and nothing in this repository names one.
+WorldToolsMixin dispatches these tools through the existing Env interface.
+Search receipts record served URLs; they do not establish source correctness.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -174,14 +120,6 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
 ]
 
-# Search tools. Named and shaped after ms-agent's own web_search/fetch_page so
-# swapping the frozen corpus for a live engine is a change of one implementation
-# and nothing else -- no task, no profile, no schema moves.
-#
-# The ranking is not trustworthy and the description says so. An engine that
-# returned only good results would train a policy that believes the first hit;
-# a task can then be written to require verification, and the policy meets the
-# unreliability where it belongs -- in the episode, not in production.
 SEARCH_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         'type': 'function',
@@ -245,11 +183,6 @@ SEARCH_TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
 ]
 
-# The shared PostgreSQL service. Separate from the world_* tools above: those
-# read a SQLite file that ships with the run, these talk to a real server over
-# TCP with a per-sandbox account. Both exist because they are different exercises
-# -- reading a file you were handed, versus connecting to infrastructure and
-# working within the grant you were given.
 DB_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         'type': 'function',
@@ -302,11 +235,7 @@ TOOL_NAMES = tuple(schema['function']['name'] for schema in TOOL_SCHEMAS + SEARC
 
 
 def _world_name(tool_name: str | None) -> str | None:
-    """The world tool this call names, or None if it is not one of ours.
-
-    Strips the ``---<id>`` suffix a harness adds to disambiguate same-named
-    tools, so a suffixed call still resolves.
-    """
+    """Resolve a plain tool name or a harness-qualified server---tool name."""
     if not tool_name:
         return None
     short = tool_name.rsplit('---', 1)[-1]
@@ -318,15 +247,7 @@ class WorldUnavailable(RuntimeError):
 
 
 class HostWorld:
-    """Read-only access to the built world, straight off the filesystem.
-
-    Deliberately does NOT go through world_service.py. The service exists for the
-    case where something other than this process needs to read the world; the host
-    already has the files, so routing an in-process call through HTTP would add a
-    port to secure and a failure mode to handle for nothing. Both read the same
-    database with the same read-only handle, so a query behaves identically either
-    way.
-    """
+    """Read a world bundle on the host; mutable receipts and credentials belong to this instance."""
 
     def __init__(self, root: str | None = None):
         # A library does not guess where its data lives. Without an explicit root
@@ -352,14 +273,15 @@ class HostWorld:
         # is opted into per run because its answers change by the hour.
         self.backend = 'corpus'
         self.live = None
-        # The retrieval calls this world actually served, in order -- `web_search`
-        # and `fetch_page` only, which is what `_receipt` records. The point is
-        # that a citation check can ask "did you really retrieve this?" and get an
-        # answer from what happened rather than from what the policy wrote down. A
-        # policy that invents a url has nothing here to match against. The SQL and
-        # document tools leave no receipt: they return values, not sources, so
-        # there is no citation to check them against.
         self.receipts: list[dict[str, Any]] = []
+
+    def fork(self, *, db_enabled: bool = False) -> HostWorld:
+        """Share loaded data while keeping receipts and database roles independent."""
+        world = copy.copy(self)
+        world.receipts = []
+        world._db_creds = None
+        world.db_enabled = db_enabled
+        return world
 
     def _load_search(self) -> None:
         # Only the explicit env var is honoured. Walking up from __file__ to find
@@ -418,14 +340,7 @@ class HostWorld:
         return self.db_path.is_file() and bool(self.docs or (self.root / 'docs').is_dir())
 
     def schemas(self) -> list[ToolInfo]:
-        """The tools this world can actually answer right now.
-
-        Advertising a tool that always answers "not configured" is worse than not
-        advertising it: the policy spends a turn discovering that, and a
-        difficulty measurement built on the episode counts the wasted turn as
-        part of the task. So each group is offered only when its backing store
-        is present.
-        """
+        """Advertise only tools whose backing data or database account support is enabled."""
         out: list[ToolInfo] = []
         if self.available:
             out.extend(TOOL_SCHEMAS)
@@ -436,12 +351,7 @@ class HostWorld:
         return out
 
     def load(self) -> None:
-        """Read the manifest and verify the files still match it.
-
-        Checked once per process at startup. The world is read-only, so a match
-        now is a match for the run; hashing a 100 KB database per query would be
-        paid on every tool call for no added safety.
-        """
+        """Validate manifest hashes and load documents and optional search at startup."""
         if self.root is None:
             raise WorldUnavailable('no world root configured: pass root=... to HostWorld or set '
                                    'TWINKLE_WORLD_ROOT to the directory holding manifest.json, ops.db '
@@ -477,11 +387,6 @@ class HostWorld:
         if not isinstance(params, (list, tuple)):
             return 'world_sql: `params` must be a list.'
         head = query.strip().lstrip('(').split(None, 1)[0].upper()
-        # Refused as a class. Measured: `PRAGMA journal_mode=WAL` and
-        # `PRAGMA user_version=99` are rejected by the read-only handle, but
-        # `PRAGMA journal_mode=DELETE` returns a row and reads like success -- a
-        # no-op only because the file is already in delete mode, which is a
-        # coincidence. None of them are needed to answer a question about the data.
         if head == 'PRAGMA':
             return 'world_sql: PRAGMA is not available on the shared world.'
         try:
@@ -629,16 +534,7 @@ class HostWorld:
 
     # ---- the shared PostgreSQL service --------------------------------
     def _db_credentials(self) -> dict[str, Any] | None:
-        """This episode's own database account, created on first use.
-
-        One account per episode, not one shared read-only login: with a shared
-        login, "read-only" is a promise about every sandbox's behaviour. With a
-        per-episode role it is a grant the server enforces, and the blast radius
-        of a bug is one episode.
-
-        Created lazily so that a run which never uses the database never creates
-        an account, and dropped in `close()`.
-        """
+        """Lazily provision this instance's database role; release() drops it."""
         if self._db_creds is not None:
             return self._db_creds
         if not self.db_enabled:
@@ -669,20 +565,6 @@ class HostWorld:
             user=creds['role'],
             password=creds['password'],
             connect_timeout=10)
-        # autocommit on, and NOT set_session(readonly=True).
-        #
-        # readonly=True was the obvious belt-and-braces move and it was wrong: a
-        # read-only transaction refuses CREATE TEMP TABLE AS, which the grant
-        # deliberately allows so a solver has somewhere to work. The two guards
-        # disagreed, and the one that fired was the one that removed a capability
-        # the profile promised -- the model would have been told it could use a
-        # scratch table and then been refused.
-        #
-        # The GRANT is the enforcement, and it is the stronger one: it is a
-        # property of the role recorded in the catalogue, it survives this process
-        # dying, and it cannot be lifted by anything the model sends. Verified in
-        # test_db.py -- insert, update, delete, truncate, drop, create table,
-        # alter and create schema are all refused by PostgreSQL itself.
         conn.autocommit = True
         return conn
 
@@ -753,16 +635,7 @@ class HostWorld:
         return '\n'.join(lines)
 
     def release(self) -> None:
-        """Drop this episode's database account, if one was made.
-
-        On HostWorld rather than only on the env that owns it: the account belongs
-        to this object, and every caller that can create one has to be able to
-        release it. Keeping it on the env alone meant a second caller would have
-        had to reimplement the drop.
-
-        Safe to call more than once. An episode killed before it gets here never
-        calls it at all -- that is what the lease and the reaper are for.
-        """
+        """Drop this instance's database role, if any. Safe to call repeatedly."""
         if self._db_creds is None:
             return
         role = self._db_creds['role']
@@ -829,14 +702,7 @@ class HostWorld:
         return None
 
     def call(self, tool_name: str, arguments: dict[str, Any]) -> str | None:
-        """Answer one world tool call, or None if the name is not ours.
-
-        The receipt is written here rather than in the caller so that every path
-        that answers a search tool records it: a check that trusted the caller to
-        remember would silently stop working the first time a second caller
-        appeared. A failed call records nothing for the url it failed on, which is
-        what makes "I fetched this" a claim with evidence behind it.
-        """
+        """Dispatch a tool and record search receipts. Unknown names return None."""
         arguments = arguments or {}
         result = self._answer(tool_name, arguments)
         if result is not None:
@@ -844,58 +710,13 @@ class HostWorld:
         return result
 
 
-def split_calls(calls: Sequence[tuple[str, dict[str, Any]]],
-                world: HostWorld) -> tuple[list[tuple[int, str]], list[tuple[str, dict[str, Any]]]]:
-    """Partition one turn's calls into (host-answered, sandbox-bound).
-
-    Batch-aware on purpose: a turn can mix a world call with shell commands, and
-    the sandbox request must carry only the calls it can actually run. Order is
-    preserved by index so the results can be reassembled positionally -- GRPO
-    rewards do not care about order, but a transcript that pairs an observation
-    with the wrong call teaches the policy something false.
-    """
-    host: list[tuple[int, str]] = []
-    sandbox: list[tuple[str, dict[str, Any]]] = []
-    for index, (name, args) in enumerate(calls):
-        short = name.rsplit('---', 1)[-1]
-        if short in TOOL_NAMES:
-            host.append((index, short))
-        else:
-            sandbox.append((name, args))
-    return host, sandbox
-
-
 class WorldToolsMixin:
-    """Serve host-side world tools alongside whatever an environment provides.
+    """Add host tools before the underlying Env in the MRO.
 
-    Mix in front of any :class:`~twinkle_agentic.envs.base.Env`::
-
-        class WorldLocalEnv(WorldToolsMixin, LocalEnv):
-            pass
-
-        env = WorldLocalEnv(workspace='/tmp/slot0', world=HostWorld(root))
-
-    The mixin answers the world's own tool names from the training host and
-    forwards everything else to the environment untouched. It adds one attribute
-    (:attr:`world`) to the public surface, so an environment that already works
-    keeps working -- and because it is a mixin rather than a change to
-    ``AgentEnv``, it applies to ``LocalEnv`` and ``OpenEnv`` as well, which is
-    what makes it testable without a sandbox host.
-
-    Two things that are easy to get wrong:
-
-    * **The mixin goes first.** ``class X(WorldToolsMixin, LocalEnv)``, not the
-      reverse: it has to precede the environment in the MRO for its ``tools``,
-      ``step`` and ``step_batch`` to be the ones called.
-    * **Tool names may arrive suffixed.** A harness that disambiguates
-      same-named tools across environments appends ``---<id>``. Both
-      :meth:`step` and :meth:`step_batch` strip that before matching, so a
-      suffixed world call is answered here instead of being forwarded to a
-      sandbox that has no such tool.
-
-    The world's lifetime is the caller's, not the mixin's: several environments
-    may share one read-only world, so ``close()`` does not release it. Pass
-    ``release_world_on_close=True`` on the environment that owns it.
+    Use class Slot(WorldToolsMixin, LocalEnv). When combined with profiles,
+    ProfiledEnvMixin must precede WorldToolsMixin so it filters world tools too.
+    By default the caller owns world cleanup; release_world_on_close=True makes
+    this environment responsible for releasing its world.
     """
 
     def __init__(self,
@@ -930,17 +751,7 @@ class WorldToolsMixin:
         return super().step(tool_name, arguments)
 
     def step_batch(self, calls: Sequence[tuple[str, dict[str, Any]]]) -> list[StepResult]:
-        """Answer the world's calls here, and send the rest as one batch.
-
-        Worth overriding rather than leaving to the serial default: the point of
-        ``step_batch`` is keeping tool execution off the generation critical
-        path, and a turn that mixes one world call with three shell commands
-        should still send those three as a single request.
-
-        Positions are tracked explicitly rather than inferred from order, so a
-        transcript cannot pair an observation with the wrong call -- which would
-        teach the policy something false without anything downstream noticing.
-        """
+        """Dispatch host and sandbox calls separately, preserving their original order."""
         if self._world is None:
             return super().step_batch(calls)
         host_at: list[int] = []
@@ -969,7 +780,7 @@ class WorldToolsMixin:
         return [r if r is not None else StepResult(observation='Error: no result') for r in out]
 
     def _answer_world(self, tool_name: str, arguments: dict[str, Any]) -> str | None:
-        """The world's answer, or None when this call is not the world's."""
+        """Return a host observation, or None for a non-world tool."""
         if self._world is None:
             return None
         name = _world_name(tool_name)
@@ -986,3 +797,10 @@ class WorldToolsMixin:
         finally:
             if self._release_world_on_close and self._world is not None:
                 self._world.release()
+
+    def clear(self) -> None:
+        """Discard the owned world's previous episode state before reusing a slot."""
+        if self._release_world_on_close and self._world is not None:
+            self._world.release()
+            self._world.receipts.clear()
+        super().clear()

@@ -47,9 +47,9 @@ def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding='utf-8'))
     except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"invalid JSON file: {path}") from error
+        raise ValueError(f'invalid JSON file: {path}') from error
     if not isinstance(value, dict):
-        raise ValueError(f"expected a JSON object: {path}")
+        raise ValueError(f'expected a JSON object: {path}')
     return value
 
 
@@ -115,24 +115,24 @@ def _knowledge_plan_metrics(plan: dict[str, Any]) -> dict[str, Any]:
         if (not isinstance(root, dict) or root.get('root_index') != root_index
                 or not isinstance(root.get('broad_family'), str) or not isinstance(root.get('root'), str)
                 or not isinstance(root.get('induced_cluster'), int)):
-            raise ValueError(f"invalid selected root {root_index}")
+            raise ValueError(f'invalid selected root {root_index}')
         if any(_knowledge_near(root['root'], previous) for previous in root_titles):
             raise ValueError(f"near-duplicate selected root: {root['root']}")
         root_titles.append(root['root'])
         leaves = root.get('leaves')
         if not isinstance(leaves, list) or len(leaves) != KNOWLEDGE_LEAVES_PER_ROOT:
-            raise ValueError(f"selected root {root_index} must contain eight leaves")
+            raise ValueError(f'selected root {root_index} must contain eight leaves')
         root_tokens.update(token for token in _knowledge_tokens(root['root']) if len(token) >= 5)
         cluster_counts[root['induced_cluster']] += 1
         for leaf_index, leaf in enumerate(leaves):
             title = leaf.get('title') if isinstance(leaf, dict) else None
             if (not isinstance(leaf, dict) or leaf.get('leaf_index') != leaf_index or not isinstance(title, str)
                     or not title):
-                raise ValueError(f"invalid selected leaf {root_index}:{leaf_index}")
+                raise ValueError(f'invalid selected leaf {root_index}:{leaf_index}')
             if _knowledge_near(title, root['root']):
-                raise ValueError(f"selected leaf repeats its root: {title}")
+                raise ValueError(f'selected leaf repeats its root: {title}')
             if any(_knowledge_near(title, previous) for previous in titles):
-                raise ValueError(f"near-duplicate selected leaf: {title}")
+                raise ValueError(f'near-duplicate selected leaf: {title}')
             titles.append(title)
             expected_paths.append({
                 'global_index': root_index * KNOWLEDGE_LEAVES_PER_ROOT + leaf_index,
@@ -281,7 +281,7 @@ class KnowledgeStore:
             self.checkpoint_sha256 = self.cards[0].checkpoint_sha256
             self.tokenizer_sha256 = self.cards[0].tokenizer_sha256
         else:
-            raise ValueError(f"knowledge manifest declares unsupported schema_version: {self.schema_version!r}")
+            raise ValueError(f'knowledge manifest declares unsupported schema_version: {self.schema_version!r}')
         order = list(range(len(self.cards)))
         random.Random(_sha256({'seed': self.seed, 'kind': 'card_order'})).shuffle(order)
         self._order = order
@@ -304,12 +304,12 @@ class KnowledgeStore:
     @staticmethod
     def _authenticated_path(directory: Path, name: Any, expected_hash: Any) -> Path:
         if not isinstance(name, str) or Path(name).name != name:
-            raise ValueError(f"invalid knowledge release path: {name!r}")
+            raise ValueError(f'invalid knowledge release path: {name!r}')
         path = directory / name
         if not path.is_file() or not isinstance(expected_hash, str):
-            raise ValueError(f"missing authenticated knowledge release file: {name}")
+            raise ValueError(f'missing authenticated knowledge release file: {name}')
         if _file_sha256(path) != expected_hash:
-            raise ValueError(f"knowledge release hash mismatch: {name}")
+            raise ValueError(f'knowledge release hash mismatch: {name}')
         return path
 
     @classmethod
@@ -359,7 +359,7 @@ class KnowledgeStore:
         for document, label in ((plan_validation, 'plan validation'), (report, 'release validation')):
             if (document.get('schema_version') != KNOWLEDGE_SCHEMA_VERSION or document.get('status') != 'accepted'
                     or document.get('plan_sha256') != plan_hash):
-                raise ValueError(f"{label} is not accepted for the published plan")
+                raise ValueError(f'{label} is not accepted for the published plan')
         if plan_validation.get('checks') != plan_metrics:
             raise ValueError('plan validation checks differ from the selected plan')
         if report.get('provenance') != provenance:
@@ -416,14 +416,14 @@ class KnowledgeStore:
                 text = record['knowledge'].strip()
                 token_count = int(record['token_count'])
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as error:
-                raise ValueError(f"{path}:{line_number}: invalid knowledge-card schema: {error}") from error
+                raise ValueError(f'{path}:{line_number}: invalid knowledge-card schema: {error}') from error
             if not 0 <= index < KNOWLEDGE_CARD_COUNT or topic_path != plan['paths'][index]:
-                raise ValueError(f"{path}:{line_number}: card does not match selected plan")
+                raise ValueError(f'{path}:{line_number}: card does not match selected plan')
             num_shards = plan.get('card_shards')
             attempt = record.get('attempt')
             if (not isinstance(num_shards, int) or num_shards < 1 or not isinstance(attempt, int)
                     or not 0 <= attempt < KNOWLEDGE_MAX_CARD_ATTEMPTS):
-                raise ValueError(f"{path}:{line_number}: invalid shard or retry metadata")
+                raise ValueError(f'{path}:{line_number}: invalid shard or retry metadata')
             prompt = _knowledge_card_prompt(topic_path)
             critique = _knowledge_critique_prompt(topic_path, record['knowledge'])
             expected = {
@@ -437,7 +437,7 @@ class KnowledgeStore:
                 'num_shards': num_shards,
                 'topic_path': topic_path,
                 'title': leaf,
-                'card_id': hashlib.sha256(f"{plan_hash}\0{index}\0{leaf}".encode()).hexdigest()[:24],
+                'card_id': hashlib.sha256(f'{plan_hash}\0{index}\0{leaf}'.encode()).hexdigest()[:24],
                 'finish_reason': 'eos',
                 'critique': 'PASS',
                 'critique_finish_reason': 'eos',
@@ -451,19 +451,19 @@ class KnowledgeStore:
                 'critique_prompt_sha256': hashlib.sha256(critique.encode('utf-8')).hexdigest(),
             }
             if any(record.get(key) != value for key, value in expected.items()):
-                raise ValueError(f"{path}:{line_number}: unaccepted card or provenance mismatch")
+                raise ValueError(f'{path}:{line_number}: unaccepted card or provenance mismatch')
             if (not isinstance(record.get('generated_token_count'), int) or record['generated_token_count'] < 1
                     or not isinstance(record.get('critique_generated_token_count'), int)
                     or record['critique_generated_token_count'] < 1):
-                raise ValueError(f"{path}:{line_number}: invalid generation token counts")
+                raise ValueError(f'{path}:{line_number}: invalid generation token counts')
             if not card_id or not root or not leaf or not text or token_count < 1:
-                raise ValueError(f"{path}:{line_number}: empty knowledge-card field")
+                raise ValueError(f'{path}:{line_number}: empty knowledge-card field')
             if not 220 <= len(re.findall(r'\S+', record['knowledge'])) <= 300:
-                raise ValueError(f"{path}:{line_number}: card word count is outside 220-300")
+                raise ValueError(f'{path}:{line_number}: card word count is outside 220-300')
             if card_id in seen_ids or index in seen_indices:
-                raise ValueError(f"{path}:{line_number}: duplicate card ID or index")
+                raise ValueError(f'{path}:{line_number}: duplicate card ID or index')
             if any(_knowledge_jaccard_near(text, previous, KNOWLEDGE_CARD_NEAR_THRESHOLD) for previous in card_texts):
-                raise ValueError(f"{path}:{line_number}: near-duplicate knowledge-card body")
+                raise ValueError(f'{path}:{line_number}: near-duplicate knowledge-card body')
             seen_ids.add(card_id)
             seen_indices.add(index)
             card_texts.append(text)
@@ -471,7 +471,7 @@ class KnowledgeStore:
                 KnowledgeCard(
                     card_id=card_id,
                     index=index,
-                    source_cue=f"{root} > {leaf}",
+                    source_cue=f'{root} > {leaf}',
                     text=text,
                     token_count=token_count,
                     model=provenance['model_path'],
@@ -489,7 +489,7 @@ class KnowledgeStore:
                 ))
         cards.sort(key=lambda card: card.index)
         if len(cards) != KNOWLEDGE_CARD_COUNT or [card.index for card in cards] != list(range(KNOWLEDGE_CARD_COUNT)):
-            raise ValueError(f"knowledge-card indices must be contiguous from zero in {path}")
+            raise ValueError(f'knowledge-card indices must be contiguous from zero in {path}')
         return cards
 
     @staticmethod
@@ -517,15 +517,15 @@ class KnowledgeStore:
                 checkpoint_sha256 = record['checkpoint_sha256']
                 tokenizer_sha256 = record['tokenizer_sha256']
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as error:
-                raise ValueError(f"{path}:{line_number}: invalid knowledge-card schema: {error}") from error
+                raise ValueError(f'{path}:{line_number}: invalid knowledge-card schema: {error}') from error
             if record.get('schema_version') != KNOWLEDGE_LEGACY_SCHEMA_VERSION:
-                raise ValueError(f"{path}:{line_number}: unsupported schema_version")
+                raise ValueError(f'{path}:{line_number}: unsupported schema_version')
             if record.get('finish_reason') != 'eos':
-                raise ValueError(f"{path}:{line_number}: unfinished knowledge card")
+                raise ValueError(f'{path}:{line_number}: unfinished knowledge card')
             if not card_id or not root or not leaf or not text or token_count < 1:
-                raise ValueError(f"{path}:{line_number}: empty knowledge-card field")
+                raise ValueError(f'{path}:{line_number}: empty knowledge-card field')
             if card_id in seen_ids or index in seen_indices:
-                raise ValueError(f"{path}:{line_number}: duplicate card ID or index")
+                raise ValueError(f'{path}:{line_number}: duplicate card ID or index')
             seen_ids.add(card_id)
             seen_indices.add(index)
             provenance.add((model, checkpoint_sha256, tokenizer_sha256))
@@ -533,7 +533,7 @@ class KnowledgeStore:
                 KnowledgeCard(
                     card_id=card_id,
                     index=index,
-                    source_cue=f"{root} > {leaf}",
+                    source_cue=f'{root} > {leaf}',
                     text=text,
                     token_count=token_count,
                     model=model,
@@ -548,15 +548,15 @@ class KnowledgeStore:
                     },
                 ))
         if len(cards) < len(KNOWLEDGE_ARMS):
-            raise ValueError(f"knowledge routing requires at least {len(KNOWLEDGE_ARMS)} cards")
+            raise ValueError(f'knowledge routing requires at least {len(KNOWLEDGE_ARMS)} cards')
         if len(provenance) != 1:
-            raise ValueError(f"mixed model provenance in {path}")
+            raise ValueError(f'mixed model provenance in {path}')
         cards.sort(key=lambda card: card.index)
         if [card.index for card in cards] != list(range(len(cards))):
-            raise ValueError(f"knowledge-card indices must be contiguous from zero in {path}")
+            raise ValueError(f'knowledge-card indices must be contiguous from zero in {path}')
         declared = manifest.get('cards')
         if declared is not None and declared != len(cards):
-            raise ValueError(f"manifest declares {declared} cards but {path} holds {len(cards)}")
+            raise ValueError(f'manifest declares {declared} cards but {path} holds {len(cards)}')
         return cards
 
     def route(self, group_id: int, epoch: int = 0) -> KnowledgeRoute:

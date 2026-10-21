@@ -10,6 +10,7 @@ has to get exactly the environments it got before this module existed. Everythin
 else is what the two optional layers add on top, and both are verified against
 ``LocalEnv``, which needs no sandbox host.
 """
+import ast
 import hashlib
 import importlib.util
 import json
@@ -256,17 +257,74 @@ def test_a_sandbox_template_selects_agentenv_and_carries_the_guard(slot, monkeyp
     assert [kwargs['metadata']['slot'] for kwargs in built] == ['0', '1']
 
 
-def test_only_the_last_slot_releases_the_shared_world(slot, clean_env, tmp_path, world_root):
-    # One world object for the whole pool, so the per-episode database role has
-    # to be dropped once and only once however the pool is torn down.
+def test_slots_release_their_own_world_state(slot, clean_env, tmp_path, world_root):
     clean_env.setenv('TWINKLE_WORLD_ROOT', str(world_root))
     world = slot.configured_world()
     envs = slot.build_slot_envs(num_envs=3, workspace_root=str(tmp_path / 'slots'), world=world)
     try:
-        assert [env.world is world for env in envs] == [True, True, True]
-        assert [env._release_world_on_close for env in envs] == [False, False, True]
+        assert len({id(env.world) for env in envs}) == 3
+        assert all(env.world is not world for env in envs)
+        assert all(env._release_world_on_close for env in envs)
     finally:
         close_all(envs)
+
+
+def test_receipts_do_not_leak_between_slots_or_episodes(slot, clean_env, tmp_path, world_root, search_root):
+    clean_env.setenv('TWINKLE_WORLD_ROOT', str(world_root))
+    clean_env.setenv('TWINKLE_WORLD_SEARCH_ROOT', str(search_root))
+    envs = slot.build_slot_envs(num_envs=2, workspace_root=str(tmp_path / 'slots'), world=slot.configured_world())
+    try:
+        envs[0].step('fetch_page', {'url': 'https://example.com/a'})
+        assert envs[0].world.receipts[0]['urls']
+        assert envs[1].world.receipts == []
+        envs[0].clear()
+        assert envs[0].world.receipts == []
+    finally:
+        close_all(envs)
+
+
+def test_database_profile_enables_database_tools_only_for_its_slot(slot, clean_env, tmp_path, world_root):
+    clean_env.setenv('TWINKLE_WORLD_ROOT', str(world_root))
+    envs = slot.build_slot_envs(num_envs=2, workspace_root=str(tmp_path / 'slots'),
+                                world=slot.configured_world(), profile_ids=['db-analyst@1', 'world-forensics@1'])
+    try:
+        assert {'db_query', 'db_schema'} <= set(tool_names(envs[0]))
+        assert not {'db_query', 'db_schema'} & set(tool_names(envs[1]))
+    finally:
+        close_all(envs)
+
+
+def test_configuration_rejects_a_bad_profile_before_slots_are_built(slot, clean_env):
+    clean_env.setenv('TWINKLE_RSI_PROFILES', 'no-such-profile@1')
+    with pytest.raises(ValueError, match='not registered'):
+        slot.configured_profiles()
+
+
+@pytest.mark.parametrize('bad_artifact', ['profile', 'knowledge_bank'])
+def test_bad_run_artifacts_fail_before_distributed_initialization(slot, clean_env, tmp_path, bad_artifact):
+    # Load only main(), avoiding the executable CLI and its distributed imports.
+    from twinkle_agentic.challenger import KnowledgeStore, TaskBank
+
+    script = SLOT_PATH.parents[1] / 'rsi_grpo.py'
+    main = next(node for node in ast.parse(script.read_text()).body
+                if isinstance(node, ast.FunctionDef) and node.name == 'main')
+    namespace = dict(KnowledgeStore=KnowledgeStore, TaskBank=TaskBank,
+                     KNOWLEDGE_CARDS='', KNOWLEDGE_SEED=0, TASK_BANK_PATH='', SAVE_DIR='',
+                     configured_world=slot.configured_world, configured_profiles=slot.configured_profiles)
+    if bad_artifact == 'profile':
+        clean_env.setenv('TWINKLE_RSI_PROFILES', 'no-such-profile@1')
+    else:
+        bank = tmp_path / 'cards.jsonl'
+        bank.write_text('{}\n')
+        namespace['KNOWLEDGE_CARDS'] = str(bank)
+
+    def allocate(*args, **kwargs):
+        pytest.fail('distributed initialization reached before artifact validation')
+
+    namespace['DeviceGroup'] = allocate
+    exec(compile(ast.Module(body=[main], type_ignores=[]), str(script), 'exec'), namespace)
+    with pytest.raises(ValueError):
+        namespace['main']()
 
 
 def test_a_run_without_a_search_corpus_still_gets_its_world(slot, clean_env, tmp_path, world_root):

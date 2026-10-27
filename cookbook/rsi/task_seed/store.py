@@ -95,7 +95,7 @@ def stable_task_id(text: str) -> str:
 def atomic_write_bytes(path: os.PathLike[str] | str, data: bytes) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix='.tmp', dir=destination.parent)
+    fd, temporary = tempfile.mkstemp(prefix=f'.{destination.name}.', suffix='.tmp', dir=destination.parent)
     try:
         with os.fdopen(fd, 'wb') as handle:
             handle.write(data)
@@ -128,9 +128,9 @@ def load_json(path: os.PathLike[str] | str) -> Any:
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValidationError(f"invalid JSON in {path}: {exc}") from exc
+        raise ValidationError(f'invalid JSON in {path}: {exc}') from exc
     if canonical_json_line(value) != raw:
-        raise ValidationError(f"JSON is not canonical in {path}")
+        raise ValidationError(f'JSON is not canonical in {path}')
     return value
 
 
@@ -138,21 +138,21 @@ def iter_strict_jsonl(path: os.PathLike[str] | str) -> Iterator[tuple[int, dict[
     with open(path, 'rb') as handle:
         for line_number, raw in enumerate(handle, 1):
             if not raw.endswith(b'\n'):
-                raise ValidationError(f"unterminated JSONL line {line_number} in {path}")
+                raise ValidationError(f'unterminated JSONL line {line_number} in {path}')
             try:
                 record = json.loads(raw)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ValidationError(f"invalid JSONL line {line_number} in {path}: {exc}") from exc
+                raise ValidationError(f'invalid JSONL line {line_number} in {path}: {exc}') from exc
             if not isinstance(record, dict):
-                raise ValidationError(f"JSONL line {line_number} is not an object")
+                raise ValidationError(f'JSONL line {line_number} is not an object')
             if canonical_json_line(record) != raw:
-                raise ValidationError(f"JSONL line {line_number} is not canonical")
+                raise ValidationError(f'JSONL line {line_number} is not canonical')
             yield line_number, record
 
 
 def _hash_file_set(root: Path, files: Sequence[Path]) -> str:
     if not files:
-        raise ValidationError(f"no fingerprintable files under {root}")
+        raise ValidationError(f'no fingerprintable files under {root}')
     digest = hashlib.sha256()
     for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):
         relative = path.relative_to(root).as_posix()
@@ -164,7 +164,7 @@ def _hash_file_set(root: Path, files: Sequence[Path]) -> str:
 def model_tree_hash(model_path: os.PathLike[str] | str) -> str:
     root = Path(model_path).resolve()
     if not root.is_dir():
-        raise ValidationError(f"model path is not a directory: {root}")
+        raise ValidationError(f'model path is not a directory: {root}')
     files = [
         path for path in root.rglob('*') if path.is_file() and (
             path.suffix in {'.safetensors', '.bin', '.pt'} or path.name in {'config.json', 'generation_config.json'})
@@ -190,11 +190,11 @@ def tokenizer_tree_hash(model_path: os.PathLike[str] | str) -> str:
 
 def validate_source_record(record: Mapping[str, Any], line_number: int) -> None:
     if set(record) != {'source_id', 'text'}:
-        raise ValidationError(f"input line {line_number} must contain exactly source_id and text")
+        raise ValidationError(f'input line {line_number} must contain exactly source_id and text')
     if not isinstance(record['source_id'], (str, int)) or isinstance(record['source_id'], bool):
-        raise ValidationError(f"input line {line_number} has invalid source_id")
+        raise ValidationError(f'input line {line_number} has invalid source_id')
     if not isinstance(record['text'], str) or not record['text'].strip():
-        raise ValidationError(f"input line {line_number} has empty text")
+        raise ValidationError(f'input line {line_number} has empty text')
 
 
 def validate_decoded_payload(payload: Any) -> dict[str, Any]:
@@ -202,7 +202,7 @@ def validate_decoded_payload(payload: Any) -> dict[str, Any]:
         raise ValidationError('decoded JSON must contain exactly task_direction, required_artifact, constraints')
     for key in ('task_direction', 'required_artifact'):
         if not isinstance(payload[key], str) or not payload[key].strip():
-            raise ValidationError(f"decoded {key} must be a non-empty string")
+            raise ValidationError(f'decoded {key} must be a non-empty string')
     constraints = payload['constraints']
     if not isinstance(constraints, list) or not constraints:
         raise ValidationError('decoded constraints must be a non-empty list')
@@ -218,14 +218,14 @@ def task_text(payload: Mapping[str, Any]) -> str:
 
 def validate_final_record(record: Mapping[str, Any], expected_index: int | None = None) -> None:
     if set(record) != FINAL_RECORD_KEYS:
-        raise ValidationError(f"final record keys differ: {sorted(set(record) ^ FINAL_RECORD_KEYS)}")
+        raise ValidationError(f'final record keys differ: {sorted(set(record) ^ FINAL_RECORD_KEYS)}')
     if record['schema_version'] != SCHEMA_VERSION:
         raise ValidationError('unsupported record schema_version')
     index = record['global_index']
     if not isinstance(index, int) or isinstance(index, bool) or index < 0:
         raise ValidationError('global_index must be a non-negative integer')
     if expected_index is not None and index != expected_index:
-        raise ValidationError(f"expected global_index {expected_index}, got {index}")
+        raise ValidationError(f'expected global_index {expected_index}, got {index}')
     payload = {key: record[key] for key in ('task_direction', 'required_artifact', 'constraints')}
     validate_decoded_payload(payload)
     text = task_text(payload)
@@ -243,9 +243,9 @@ def validate_final_record(record: Mapping[str, Any], expected_index: int | None 
             'initial_decoded_cosine',
     ):
         if not isinstance(record[key], (int, float)) or isinstance(record[key], bool):
-            raise ValidationError(f"{key} must be numeric")
+            raise ValidationError(f'{key} must be numeric')
         if not float('-inf') < float(record[key]) < float('inf'):
-            raise ValidationError(f"{key} must be finite")
+            raise ValidationError(f'{key} must be finite')
     if not isinstance(record['seed'], int) or isinstance(record['seed'], bool):
         raise ValidationError('seed must be an integer')
     if not isinstance(record['actual_batch_size'], int) or record['actual_batch_size'] < 1:
@@ -257,7 +257,7 @@ def validate_final_record(record: Mapping[str, Any], expected_index: int | None 
         raise ValidationError('invalid record provenance keys')
     for key in ('model_hash', 'tokenizer_hash', 'config_hash', 'plan_hash'):
         if not isinstance(provenance[key], str) or not _HEX64.fullmatch(provenance[key]):
-            raise ValidationError(f"invalid provenance {key}")
+            raise ValidationError(f'invalid provenance {key}')
     if not isinstance(provenance['shard_id'], int) or not isinstance(provenance['num_shards'], int):
         raise ValidationError('invalid provenance shard identifiers')
     if provenance['num_shards'] != 8 or not 0 <= provenance['shard_id'] < 8:
@@ -268,12 +268,12 @@ def validate_final_record(record: Mapping[str, Any], expected_index: int | None 
 
 def _expect_file(root: Path, descriptor: Any, expected_path: str) -> Path:
     if not isinstance(descriptor, dict) or set(descriptor) != {'path', 'sha256'}:
-        raise ValidationError(f"invalid descriptor for {expected_path}")
+        raise ValidationError(f'invalid descriptor for {expected_path}')
     if descriptor['path'] != expected_path or not _HEX64.fullmatch(str(descriptor['sha256'])):
-        raise ValidationError(f"invalid descriptor values for {expected_path}")
+        raise ValidationError(f'invalid descriptor values for {expected_path}')
     path = root / expected_path
     if not path.is_file() or sha256_file(path) != descriptor['sha256']:
-        raise ValidationError(f"hash mismatch for {path}")
+        raise ValidationError(f'hash mismatch for {path}')
     return path
 
 
